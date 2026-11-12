@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover
         return [x]
 
 from . import explain
-from ._where import Where, where
+from ._where import Where, torch_caller, where
 from .report import BUG, CHECK, Finding, Report
 
 # ---------------------------------------------------------------- op tables
@@ -103,6 +103,12 @@ def _base(name: str) -> str:
     elif n.endswith("_") and not n.endswith("__"):
         n = n[:-1]
     return _ALIASES.get(n, n)
+
+
+def _is_inplace(name: str) -> bool:
+    if name.startswith("__"):
+        return name in ("__iadd__", "__isub__", "__imul__", "__itruediv__")
+    return name.endswith("_") and not name.startswith("attr:")
 
 
 def _shape(t: torch.Tensor) -> tuple[int, ...]:
@@ -213,6 +219,7 @@ class Session:
         self._nonzero_grad: set[int] = set()
         self._stepped: set[int] = set()
         self._dirty: set[int] = set()  # holds a gradient carried over from before the last step
+        self._data_of = WeakTensorKeyDictionary()  # p.data tensor -> weakref to the parameter p
         self._param_refs: dict[int, weakref.ref] = {}
 
         # modules
@@ -293,7 +300,7 @@ class Session:
         self._param_refs[pid] = weakref.ref(p)
 
         def hook(grad, pid=pid, pref=weakref.ref(p)):
-            if self._busy or not self._active:
+            if self._busy or not self._active or grad is None:
                 return None
             self._busy = True
             try:
@@ -351,6 +358,8 @@ class Session:
         if not ins:
             return
         self._order += 1
+        if name == "attr:data" or _is_inplace(name):
+            self._manual_update(name, args, out)
 
         if base in BROADCAST_OPS and len(ins) >= 2:
             self._check_broadcast(base, ins)
@@ -440,6 +449,13 @@ class Session:
         return "other"
 
     def _cut(self, mask: int, kind: str, op: str) -> None:
+        # torch's own bookkeeping (DDP syncing parameters, optimizers, clip_grad_norm_ ...)
+        # detaches on purpose; only cuts made by the user's code (or other libraries) count.
+        # no_grad / inference_mode are the user's choice when the op is torch's layer code
+        # (F.linear inside nn.Linear), but not inside DDP, optimizers or nn.utils.
+        by = torch_caller()
+        if by == "infra" or (by == "torch" and kind not in ("no_grad", "inference_mode")):
+            return
         cover = self._cut_cover.get(kind, 0)
         if not mask & ~cover:
             return
@@ -496,6 +512,13 @@ class Session:
     def _module_pre(self, module: nn.Module, inputs) -> None:
         if self._busy or not self._active:
             return
+        # no optimizer (weights updated by hand): count backward passes as steps instead
+        if (self.max_steps is not None and self.report.steps == 0 and not self._optimizers
+                and self.report.backwards >= self.max_steps):
+            self.stop()
+            if self.stop_at_limit:
+                raise _Done()
+            return
         self._busy = True
         try:
             mid = id(module)
@@ -514,6 +537,32 @@ class Session:
             self._internal_errors.append(repr(e))
         finally:
             self._busy = False
+
+    def _param_of(self, t) -> torch.Tensor | None:
+        if not isinstance(t, torch.Tensor):
+            return None
+        r = self._param_refs.get(id(t))
+        if r is not None and r() is t:
+            return t
+        r = self._data_of.get(t)
+        return r() if r is not None else None
+
+    def _manual_update(self, name: str, args, out) -> None:
+        """Weights updated by hand (p.data.add_(...), p -= lr * p.grad under no_grad)."""
+        p = self._param_of(args[0]) if args else None
+        if p is None:
+            return
+        if name == "attr:data":
+            if isinstance(out, torch.Tensor):
+                self._data_of[out] = weakref.ref(p)
+            return
+        if p.grad is None:  # initialisation, not an update
+            return
+        pid = id(p)
+        if pid in self._dirty:
+            self._dirty.discard(pid)
+            self._add(explain.grad_not_cleared(*where(4), manual=True))
+        self._stepped.add(pid)
 
     def _opt_pre(self, opt, args, kwargs) -> None:
         if not self._active:
@@ -544,6 +593,9 @@ class Session:
     def _models(self) -> list[nn.Module]:
         mods = [r() for r in self._called.values()]
         mods = [m for m in mods if m is not None] + [m for m in self._explicit_models if m is not None]
+        # torch.compile wraps the model in an OptimizedModule; report the original module's names
+        mods = [getattr(m, "_orig_mod", m) if isinstance(getattr(m, "_orig_mod", None), nn.Module) else m
+                for m in mods]
         uniq: dict[int, nn.Module] = {}
         for m in mods:
             uniq.setdefault(id(m), m)

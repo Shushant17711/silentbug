@@ -120,7 +120,22 @@ silentbug (1.09x). It is meant to run for a few steps, not for a whole training 
 
 ## Limits
 
-* Tested on PyTorch 2.15 with Python 3 on CPU. Not yet tested on GPU, with `torch.compile`, or with DDP/FSDP.
+## Tested setups
+
+* PyTorch 2.15 on CPU and PyTorch 2.14 with CUDA 13.0 on an RTX 4060: unit tests and all 15 benchmark
+  cases plus their 15 fixed versions, on both devices.
+* Mixed precision (`torch.autocast` with fp16 + `GradScaler`, and bf16): bugs found, clean code stays quiet.
+* `torch.compile` (a compiled model, and a compiled loss function): findings name the original module.
+* DDP with 2 processes (`torchrun`, gloo): DDP's own internal detach is not reported. Only rank 0 prints.
+* Real code, unchanged: karpathy/nanoGPT (CUDA, with and without `compile`, with gradient accumulation)
+  and pytorch/examples `word_language_model` (manual SGD with no optimizer). Neither gave a false alarm.
+  When `model.zero_grad()` was deleted from the second one, silentbug reported it at the update line.
+
+## Limits
+
+* Not tested with FSDP, tensor or pipeline parallelism, or on multiple GPUs at once.
+* Inside a compiled region silentbug sees the call to the compiled function, not each op inside it,
+  so a cut made inside a compiled function gets reported at the line that called it.
 * It only sees what runs during the steps it watches. A branch that runs only every 100 steps is
   not checked.
 * `broadcast` checks the first three tensor arguments of each op.

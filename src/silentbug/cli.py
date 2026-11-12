@@ -50,7 +50,10 @@ def run(argv: list[str]) -> int:
     finally:
         sys.argv = old_argv
         rep = s.stop()
-    if a.json == "-":
+    rank = os.environ.get("RANK", "0")  # under torchrun every rank sees the same code
+    if rank != "0":
+        pass
+    elif a.json == "-":
         print(rep.to_json())
     else:
         print(rep, file=sys.stderr if a.keep_going else sys.stdout)

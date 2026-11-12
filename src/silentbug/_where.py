@@ -64,6 +64,25 @@ class Where:
         return {"file": self.file, "line": self.line, "function": self.func, "code": self.code, "library": self.lib}
 
 
+# torch packages that copy, sync or update parameters as bookkeeping, not as part of the model
+_INFRA = tuple(_TORCH_DIR + d + os.sep for d in (
+    "distributed", os.path.join("nn", "parallel"), "optim", os.path.join("nn", "utils"),
+    "amp", os.path.join("cuda", "amp")))
+
+
+def torch_caller(skip: int = 2) -> str | None:
+    """'infra' or 'torch' when the nearest frame outside silentbug is PyTorch's own code."""
+    f = sys._getframe(skip)
+    while f is not None:
+        p = _real(f.f_code.co_filename)
+        if not p.startswith(_OWN_DIR):
+            if p.startswith(_INFRA) or p.startswith(_TORCH_DIR + "_tensor_str"):
+                return "infra"
+            return "torch" if p.startswith(_TORCH_DIR) else None
+        f = f.f_back
+    return None
+
+
 def where(skip: int = 2) -> tuple[Where | None, Where | None]:
     """Return (first frame outside torch, first frame outside installed packages)."""
     f = sys._getframe(skip)

@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -256,3 +257,95 @@ def test_benchmark():
     r = subprocess.run([sys.executable, os.path.join(BENCH, "score.py"), exe],
                        capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout[-2000:]
+
+
+# ---------------------------------------------------------------- torch.compile and DDP
+
+def test_torch_compile_model():
+    class M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a, self.g, self.b = nn.Linear(4, 8), nn.Linear(8, 8), nn.Linear(8, 1)
+
+        def forward(self, x):
+            h = torch.relu(self.a(x))
+            return self.b(h * self.g(h).detach())
+
+    m = M()
+    cm = torch.compile(m, backend="eager")
+    x, y = torch.randn(16, 4), torch.randn(16)
+    rep = train(m, lambda _: F.mse_loss(cm(x), y))
+    assert "broadcast" in kinds(rep), str(rep)
+    dead = [f for f in rep.bugs if f.kind == "dead-param"]
+    assert dead and dead[0].params == ["g.bias", "g.weight"], str(rep)
+
+
+DDP_SCRIPT = """
+import os, torch, torch.nn as nn, torch.nn.functional as F, torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+dist.init_process_group("gloo"); torch.manual_seed(0)
+buggy = os.environ.get("BUGGY") == "1"
+class Net(nn.Module):
+    def __init__(s):
+        super().__init__(); s.a = nn.Linear(8, 16); s.aux = nn.Linear(16, 4); s.b = nn.Linear(16, 1)
+    def forward(s, x):
+        h = torch.relu(s.a(x)); z = s.aux(h); return s.b(h), z
+m = DDP(Net(), find_unused_parameters=True)
+opt = torch.optim.SGD(m.parameters(), 0.1)
+x = torch.randn(16, 8); y = torch.randn(16) if buggy else torch.randn(16, 1)
+for _ in range(4):
+    out, z = m(x)
+    loss = F.mse_loss(out, y) + (0 if buggy else z.pow(2).mean())
+    opt.zero_grad(); loss.backward(); opt.step()
+dist.destroy_process_group()
+"""
+
+
+@pytest.mark.parametrize("buggy", [True, False])
+def test_ddp_two_ranks(tmp_path, buggy):
+    if not torch.distributed.is_available():
+        pytest.skip("torch.distributed not available")
+    script = tmp_path / "ddp.py"
+    script.write_text(DDP_SCRIPT)
+    env = dict(os.environ, BUGGY="1" if buggy else "0", PYTHONWARNINGS="ignore")
+    r = subprocess.run(
+        [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", "2", "--no-python",
+         os.path.join(os.path.dirname(sys.executable), "silentbug"), "run", "--json", "-", str(script)],
+        capture_output=True, text=True, timeout=300, env=env, cwd=tmp_path)
+    if buggy:
+        assert r.returncode != 0
+        rep = json.loads(r.stdout[r.stdout.index("{"):])
+        got = {(f["kind"], f["detail"].get("cause")) for f in rep["findings"]}
+        assert got == {("broadcast", None), ("dead-param", "orphan")}, r.stdout
+    else:
+        assert r.returncode == 0, r.stdout + r.stderr[-2000:]
+
+
+# ---------------------------------------------------------------- manual updates (no optimizer)
+
+def _manual(clear: bool, style: str):
+    m = nn.Linear(4, 1)
+    with silentbug.check() as rep:
+        for _ in range(3):
+            if clear:
+                m.zero_grad()
+            m(torch.randn(8, 4)).pow(2).mean().backward()
+            for p in m.parameters():
+                if style == "data":
+                    p.data.add_(p.grad, alpha=-0.1)
+                else:
+                    with torch.no_grad():
+                        p -= 0.1 * p.grad
+    return rep
+
+
+@pytest.mark.parametrize("style", ["data", "no_grad"])
+def test_manual_update_missing_zero_grad(style):
+    rep = _manual(False, style)
+    assert "grad-not-cleared" in kinds(rep), str(rep)
+
+
+@pytest.mark.parametrize("style", ["data", "no_grad"])
+def test_manual_update_clean(style):
+    rep = _manual(True, style)
+    assert not rep.bugs, str(rep)

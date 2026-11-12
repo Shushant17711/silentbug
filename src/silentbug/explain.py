@@ -211,7 +211,13 @@ def batchnorm_batch1(shape, w, c) -> Finding:
                    "use a larger batch, drop_last=True in the DataLoader, or GroupNorm/LayerNorm", w, c)
 
 
-def grad_not_cleared(w, c) -> Finding:
+def grad_not_cleared(w, c, manual: bool = False) -> Finding:
+    if manual:
+        return Finding("grad-not-cleared", BUG, "gradients from the previous step were not cleared",
+                       "this weight update used gradients that still held the previous step's values: backward() adds onto "
+                       ".grad, so every update uses the sum of all past gradients and the effective learning rate keeps growing",
+                       "clear the gradients once per step, e.g. model.zero_grad() or p.grad = None for each parameter, "
+                       "before backward()", w, c)
     return Finding("grad-not-cleared", BUG, "gradients from the previous step were not cleared",
                    "this optimizer.step() used gradients that still held the previous step's values: backward() adds onto .grad, so every step uses the "
                    "sum of all past gradients and the effective learning rate keeps growing",
