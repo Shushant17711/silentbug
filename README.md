@@ -25,7 +25,7 @@ silentbug: checked 3 backward pass(es), 3 optimizer step(s) on Net
 ## Install
 
 ```bash
-pip install git+https://github.com/Shushant17711/silentbug@v0.1.0   # Python 3.10+, PyTorch 2.1+
+pip install silentbug          # Python 3.10+, PyTorch 2.1+
 ```
 
 From a clone, for development:
