@@ -25,7 +25,14 @@ silentbug: checked 3 backward pass(es), 3 optimizer step(s) on Net
 ## Install
 
 ```bash
-pip install -e .        # Python 3.10+, PyTorch 2.1+
+pip install git+https://github.com/Shushant17711/silentbug@v0.1.0   # Python 3.10+, PyTorch 2.1+
+```
+
+From a clone, for development:
+
+```bash
+git clone https://github.com/Shushant17711/silentbug && cd silentbug
+pip install -e ".[test]" && pytest tests
 ```
 
 ## Use it
@@ -134,8 +141,10 @@ silentbug (1.09x). It is meant to run for a few steps, not for a whole training 
 ## Limits
 
 * Not tested with FSDP, tensor or pipeline parallelism, or on multiple GPUs at once.
-* Inside a compiled region silentbug sees the call to the compiled function, not each op inside it,
-  so a cut made inside a compiled function gets reported at the line that called it.
+* `torch.compile`: while silentbug watches, the compiler stops at silentbug's hooks and runs the
+  compiled code op by op. That is why findings inside a compiled function point at the exact line
+  there. It also means bugs that only happen in compiled graphs (compiler bugs) are not seen, and
+  the watched steps run at eager speed. Compilation goes back to normal once the check ends.
 * It only sees what runs during the steps it watches. A branch that runs only every 100 steps is
   not checked.
 * `broadcast` checks the first three tensor arguments of each op.

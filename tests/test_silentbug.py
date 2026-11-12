@@ -349,3 +349,21 @@ def test_manual_update_missing_zero_grad(style):
 def test_manual_update_clean(style):
     rep = _manual(True, style)
     assert not rep.bugs, str(rep)
+
+
+def test_compiled_function_reports_exact_inner_line():
+    a, g, b = nn.Linear(4, 8), nn.Linear(8, 8), nn.Linear(8, 1)
+
+    @torch.compile(backend="eager")
+    def fwd(x):
+        h = torch.relu(a(x))
+        gate = g(h).detach()  # CUT
+        return b(h * gate)
+
+    opt = torch.optim.SGD([*a.parameters(), *g.parameters(), *b.parameters()], 0.1)
+    with silentbug.check(a, g, b, optimizer=opt) as rep:
+        for _ in range(2):
+            opt.zero_grad(); fwd(torch.randn(8, 4)).pow(2).mean().backward(); opt.step()
+    dead = [f for f in rep.bugs if f.kind == "dead-param"]
+    assert dead and dead[0].params == ["Linear#2.bias", "Linear#2.weight"], str(rep)
+    assert dead[0].where.code.endswith("# CUT"), str(rep)

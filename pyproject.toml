@@ -19,6 +19,11 @@ classifiers = [
   "Topic :: Software Development :: Debuggers",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Shushant17711/silentbug"
+Issues = "https://github.com/Shushant17711/silentbug/issues"
+Changelog = "https://github.com/Shushant17711/silentbug/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 test = ["pytest"]
 
